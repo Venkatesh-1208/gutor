@@ -1,0 +1,317 @@
+##############################################################
+# Azure DevOps Pipeline – Hub Network Terraform Deployment
+#
+# Supports two environments: test & prod
+# Each environment runs:  init → validate → plan → (approval) → apply
+#
+# Required ADO Variable Group: "terraform-secrets"
+#   ARM_CLIENT_ID       – Service Principal App ID
+#   ARM_CLIENT_SECRET   – Service Principal Secret
+#   ARM_TENANT_ID       – Azure Tenant ID
+#   ARM_SUBSCRIPTION_ID – Hub Subscription ID
+#   TF_BACKEND_RG       – Resource Group for Terraform state storage
+#   TF_BACKEND_SA       – Storage Account name for Terraform state
+#   TF_BACKEND_CONTAINER– Blob container name for Terraform state
+##############################################################
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - "**/*.tf"
+      - "**/*.tfvars"
+      - ".pipelines/**"
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - "**/*.tf"
+      - "**/*.tfvars"
+
+parameters:
+  - name: environment
+    displayName: "Target Environment"
+    type: string
+    default: test
+    values:
+      - test
+      - prod
+
+  - name: action
+    displayName: "Terraform Action"
+    type: string
+    default: plan
+    values:
+      - plan
+      - apply
+      - destroy
+
+variables:
+  - group: terraform-secrets          # linked variable group in ADO Library
+  - name: TF_VERSION
+    value: "1.7.5"
+  - name: WORKING_DIR
+    value: "$(Build.SourcesDirectory)"
+  - name: TFVARS_FILE
+    value: "environments/${{ parameters.environment }}/${{ parameters.environment }}.tfvars"
+  - name: TF_STATE_KEY
+    value: "hub-network/${{ parameters.environment }}/terraform.tfstate"
+
+# ── Stage 1: Validate (runs on every PR & push) ─────────────
+stages:
+  - stage: Validate
+    displayName: "Terraform Validate"
+    condition: always()
+    jobs:
+      - job: ValidateJob
+        displayName: "Init & Validate"
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+
+          - task: TerraformInstaller@1
+            displayName: "Install Terraform ${{ variables.TF_VERSION }}"
+            inputs:
+              terraformVersion: $(TF_VERSION)
+
+          - task: TerraformTaskV4@4
+            displayName: "terraform init"
+            inputs:
+              provider: azurerm
+              command: init
+              workingDirectory: $(WORKING_DIR)
+              backendServiceArm: "azure-service-connection"    # ← Name of your ADO ARM Service Connection
+              backendAzureRmResourceGroupName: $(TF_BACKEND_RG)
+              backendAzureRmStorageAccountName: $(TF_BACKEND_SA)
+              backendAzureRmContainerName: $(TF_BACKEND_CONTAINER)
+              backendAzureRmKey: $(TF_STATE_KEY)
+            env:
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+
+          - task: TerraformTaskV4@4
+            displayName: "terraform validate"
+            inputs:
+              provider: azurerm
+              command: validate
+              workingDirectory: $(WORKING_DIR)
+            env:
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+
+          - script: |
+              echo "## Terraform Format Check"
+              terraform fmt -check -recursive -diff
+            displayName: "terraform fmt check"
+            workingDirectory: $(WORKING_DIR)
+
+  # ── Stage 2: Plan ────────────────────────────────────────────
+  - stage: Plan
+    displayName: "Terraform Plan (${{ parameters.environment }})"
+    dependsOn: Validate
+    condition: succeeded()
+    jobs:
+      - job: PlanJob
+        displayName: "terraform plan"
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+
+          - task: TerraformInstaller@1
+            displayName: "Install Terraform ${{ variables.TF_VERSION }}"
+            inputs:
+              terraformVersion: $(TF_VERSION)
+
+          - task: TerraformTaskV4@4
+            displayName: "terraform init"
+            inputs:
+              provider: azurerm
+              command: init
+              workingDirectory: $(WORKING_DIR)
+              backendServiceArm: "azure-service-connection"
+              backendAzureRmResourceGroupName: $(TF_BACKEND_RG)
+              backendAzureRmStorageAccountName: $(TF_BACKEND_SA)
+              backendAzureRmContainerName: $(TF_BACKEND_CONTAINER)
+              backendAzureRmKey: $(TF_STATE_KEY)
+            env:
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+
+          - task: TerraformTaskV4@4
+            displayName: "terraform plan"
+            inputs:
+              provider: azurerm
+              command: plan
+              workingDirectory: $(WORKING_DIR)
+              commandOptions: >-
+                -var-file="$(TFVARS_FILE)"
+                -out="$(Build.ArtifactStagingDirectory)/tfplan"
+                -detailed-exitcode
+            env:
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+
+          # Publish the plan binary so the Apply stage can consume it
+          - task: PublishPipelineArtifact@1
+            displayName: "Publish plan artifact"
+            inputs:
+              targetPath: "$(Build.ArtifactStagingDirectory)/tfplan"
+              artifact: "tfplan-${{ parameters.environment }}"
+              publishLocation: "pipeline"
+
+  # ── Stage 3: Approval gate (prod only) ──────────────────────
+  - stage: Approval
+    displayName: "Manual Approval (${{ parameters.environment }})"
+    dependsOn: Plan
+    condition: |
+      and(
+        succeeded(),
+        eq('${{ parameters.environment }}', 'prod'),
+        eq('${{ parameters.action }}', 'apply')
+      )
+    jobs:
+      - job: WaitForApproval
+        displayName: "Waiting for manual approval"
+        pool: server
+        timeoutInMinutes: 1440    # 24 hours
+        steps:
+          - task: ManualValidation@0
+            displayName: "Approve Prod Apply"
+            inputs:
+              notifyUsers: ""      # ← Add approver email(s) here
+              instructions: |
+                Review the Terraform plan artifact uploaded by the Plan stage.
+                Approve to proceed with 'terraform apply' against PRODUCTION.
+              onTimeout: reject
+
+  # ── Stage 4: Apply ───────────────────────────────────────────
+  - stage: Apply
+    displayName: "Terraform Apply (${{ parameters.environment }})"
+    dependsOn:
+      - Plan
+      - Approval
+    condition: |
+      and(
+        in(dependencies.Plan.result, 'Succeeded'),
+        in(dependencies.Approval.result, 'Succeeded', 'Skipped'),
+        eq('${{ parameters.action }}', 'apply')
+      )
+    jobs:
+      - deployment: ApplyJob
+        displayName: "terraform apply"
+        pool:
+          vmImage: ubuntu-latest
+        environment: "${{ parameters.environment }}-hub-network"  # ADO Environment with optional approvals
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: TerraformInstaller@1
+                  displayName: "Install Terraform ${{ variables.TF_VERSION }}"
+                  inputs:
+                    terraformVersion: $(TF_VERSION)
+
+                - task: DownloadPipelineArtifact@2
+                  displayName: "Download plan artifact"
+                  inputs:
+                    artifact: "tfplan-${{ parameters.environment }}"
+                    path: "$(Pipeline.Workspace)/tfplan"
+
+                - task: TerraformTaskV4@4
+                  displayName: "terraform init"
+                  inputs:
+                    provider: azurerm
+                    command: init
+                    workingDirectory: $(WORKING_DIR)
+                    backendServiceArm: "azure-service-connection"
+                    backendAzureRmResourceGroupName: $(TF_BACKEND_RG)
+                    backendAzureRmStorageAccountName: $(TF_BACKEND_SA)
+                    backendAzureRmContainerName: $(TF_BACKEND_CONTAINER)
+                    backendAzureRmKey: $(TF_STATE_KEY)
+                  env:
+                    ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+                    ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+                    ARM_TENANT_ID: $(ARM_TENANT_ID)
+                    ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+
+                - task: TerraformTaskV4@4
+                  displayName: "terraform apply"
+                  inputs:
+                    provider: azurerm
+                    command: apply
+                    workingDirectory: $(WORKING_DIR)
+                    commandOptions: "$(Pipeline.Workspace)/tfplan/tfplan"
+                  env:
+                    ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+                    ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+                    ARM_TENANT_ID: $(ARM_TENANT_ID)
+                    ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+
+  # ── Stage 5: Destroy (manual trigger only) ──────────────────
+  - stage: Destroy
+    displayName: "Terraform Destroy (${{ parameters.environment }})"
+    dependsOn: []
+    condition: eq('${{ parameters.action }}', 'destroy')
+    jobs:
+      - deployment: DestroyJob
+        displayName: "terraform destroy"
+        pool:
+          vmImage: ubuntu-latest
+        environment: "${{ parameters.environment }}-hub-network"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: TerraformInstaller@1
+                  displayName: "Install Terraform ${{ variables.TF_VERSION }}"
+                  inputs:
+                    terraformVersion: $(TF_VERSION)
+
+                - task: TerraformTaskV4@4
+                  displayName: "terraform init"
+                  inputs:
+                    provider: azurerm
+                    command: init
+                    workingDirectory: $(WORKING_DIR)
+                    backendServiceArm: "azure-service-connection"
+                    backendAzureRmResourceGroupName: $(TF_BACKEND_RG)
+                    backendAzureRmStorageAccountName: $(TF_BACKEND_SA)
+                    backendAzureRmContainerName: $(TF_BACKEND_CONTAINER)
+                    backendAzureRmKey: $(TF_STATE_KEY)
+                  env:
+                    ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+                    ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+                    ARM_TENANT_ID: $(ARM_TENANT_ID)
+                    ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+
+                - task: TerraformTaskV4@4
+                  displayName: "terraform destroy"
+                  inputs:
+                    provider: azurerm
+                    command: destroy
+                    workingDirectory: $(WORKING_DIR)
+                    commandOptions: "-var-file=\"$(TFVARS_FILE)\" -auto-approve"
+                  env:
+                    ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+                    ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+                    ARM_TENANT_ID: $(ARM_TENANT_ID)
+                    ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
