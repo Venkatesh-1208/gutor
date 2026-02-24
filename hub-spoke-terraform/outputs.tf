@@ -1,48 +1,58 @@
 ##############################################################
-# outputs.tf – Hub resource IDs and connection info
+# outputs.tf – All hub resource outputs
 ##############################################################
 
+output "resource_group_name" {
+  description = "Hub Resource Group name"
+  value       = local.rg_name
+}
+
 output "hub_vnet_id" {
-  description = "Hub VNet resource ID"
-  value       = module.hub.vnet_id
+  description = "Hub VNet resource ID (null if not deployed)"
+  value       = try(module.vnet[0].vnet_id, null)
 }
 
 output "hub_vnet_name" {
-  description = "Hub VNet name"
-  value       = module.hub.vnet_name
+  description = "Hub VNet name (null if not deployed)"
+  value       = try(module.vnet[0].vnet_name, null)
 }
 
-output "hub_resource_group_name" {
-  description = "Hub resource group name"
-  value       = module.hub.resource_group_name
+output "hub_subnet_ids" {
+  description = "Map of logical subnet key → subnet ID"
+  value       = local.subnet_ids
 }
 
-output "azure_firewall_private_ip" {
-  description = "Private IP of the Azure Firewall"
-  value       = module.hub.firewall_private_ip
+output "firewall_private_ip" {
+  description = "Azure Firewall private IP (null if not deployed)"
+  value       = var.deploy_firewall ? try(module.firewall[0].private_ip, null) : null
 }
 
-output "azure_firewall_public_ip" {
-  description = "Public IP of the Azure Firewall"
-  value       = module.hub.firewall_public_ip
+output "firewall_public_ip" {
+  description = "Azure Firewall public IP (null if not deployed)"
+  value       = try(module.firewall[0].public_ip, null)
 }
 
-output "app_gateway_public_ip" {
-  description = "Public IP of the Application Gateway"
-  value       = module.hub.appgw_public_ip
+output "appgw_public_ip" {
+  description = "Application Gateway public IP (null if not deployed)"
+  value       = try(module.appgw[0].public_ip, null)
 }
 
 output "nat_gateway_public_ip" {
-  description = "Public IP of the NAT Gateway"
-  value       = module.hub.nat_gateway_public_ip
+  description = "NAT Gateway public IP (null if not deployed)"
+  value       = try(module.nat_gateway[0].public_ip, null)
 }
 
-output "internal_load_balancer_ip" {
-  description = "Frontend IP of the Internal Load Balancer"
-  value       = module.hub.internal_lb_ip
+output "internal_lb_ip" {
+  description = "Internal LB private IP (null if not deployed)"
+  value       = try(module.load_balancer[0].internal_lb_ip, null)
 }
 
-output "external_load_balancer_ip" {
-  description = "Public IP of the External Load Balancer"
-  value       = module.hub.external_lb_ip
+output "external_lb_ip" {
+  description = "External LB public IP (null if not deployed)"
+  value       = try(module.load_balancer[0].external_lb_ip, null)
+}
+
+output "bastion_public_ip" {
+  description = "Bastion public IP (null if not deployed)"
+  value       = try(module.bastion[0].public_ip, null)
 }

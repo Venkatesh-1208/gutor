@@ -1,10 +1,14 @@
 ##############################################################
 # modules/hub/main.tf
-# Resources: Resource Group, Hub VNet, 7 Subnets, NSGs,
-#            Azure Firewall (DMZ), NAT Gateway, App Gateway,
-#            Internal LB, External LB, Bastion (Management)
+# Resources: RG, Hub VNet, Subnets (for_each), NSGs,
+#            Azure Firewall, NAT Gateway, App Gateway,
+#            Internal LB, External LB, Bastion, Route Table
+# Optional resources guarded with count = var.deploy_* ? 1 : 0
 ##############################################################
 
+##############################################################
+# Resource Group
+##############################################################
 resource "azurerm_resource_group" "hub" {
   name     = var.resource_group_name
   location = var.location
@@ -23,71 +27,23 @@ resource "azurerm_virtual_network" "hub" {
 }
 
 ##############################################################
-# Subnets
+# Subnets – for_each over the subnets map variable
+# Key  = logical name (e.g. "dmz", "bastion")
+# name = actual Azure name (fixed for AzureFirewallSubnet etc.)
 ##############################################################
-resource "azurerm_subnet" "management" {
-  name                 = "snet-management"
+resource "azurerm_subnet" "hub" {
+  for_each             = var.subnets
+  name                 = each.value.name
   resource_group_name  = azurerm_resource_group.hub.name
   virtual_network_name = azurerm_virtual_network.hub.name
-  address_prefixes     = [var.management_subnet_cidr]
-}
-
-# DMZ subnet – must be named AzureFirewallSubnet
-resource "azurerm_subnet" "dmz" {
-  name                 = "AzureFirewallSubnet"
-  resource_group_name  = azurerm_resource_group.hub.name
-  virtual_network_name = azurerm_virtual_network.hub.name
-  address_prefixes     = [var.dmz_subnet_cidr]
-}
-
-resource "azurerm_subnet" "private" {
-  name                 = "snet-private"
-  resource_group_name  = azurerm_resource_group.hub.name
-  virtual_network_name = azurerm_virtual_network.hub.name
-  address_prefixes     = [var.private_subnet_cidr]
-}
-
-resource "azurerm_subnet" "public" {
-  name                 = "snet-public"
-  resource_group_name  = azurerm_resource_group.hub.name
-  virtual_network_name = azurerm_virtual_network.hub.name
-  address_prefixes     = [var.public_subnet_cidr]
-}
-
-resource "azurerm_subnet" "appgw" {
-  name                 = "snet-appgateway"
-  resource_group_name  = azurerm_resource_group.hub.name
-  virtual_network_name = azurerm_virtual_network.hub.name
-  address_prefixes     = [var.appgw_subnet_cidr]
-}
-
-resource "azurerm_subnet" "natgw" {
-  name                 = "snet-natgateway"
-  resource_group_name  = azurerm_resource_group.hub.name
-  virtual_network_name = azurerm_virtual_network.hub.name
-  address_prefixes     = [var.natgw_subnet_cidr]
-}
-
-resource "azurerm_subnet" "corporate" {
-  name                 = "snet-corporate"
-  resource_group_name  = azurerm_resource_group.hub.name
-  virtual_network_name = azurerm_virtual_network.hub.name
-  address_prefixes     = [var.corporate_subnet_cidr]
-}
-
-# Bastion subnet – required name
-resource "azurerm_subnet" "bastion" {
-  name                 = "AzureBastionSubnet"
-  resource_group_name  = azurerm_resource_group.hub.name
-  virtual_network_name = azurerm_virtual_network.hub.name
-  address_prefixes     = [var.bastion_subnet_cidr]
+  address_prefixes     = [each.value.cidr]
 }
 
 ##############################################################
 # Network Security Groups
 ##############################################################
 resource "azurerm_network_security_group" "management" {
-  name                = "nsg-management"
+  name                = "nsg-${var.resource_group_name}-management"
   location            = azurerm_resource_group.hub.location
   resource_group_name = azurerm_resource_group.hub.name
   tags                = var.tags
@@ -100,7 +56,7 @@ resource "azurerm_network_security_group" "management" {
     protocol                   = "Tcp"
     source_port_range          = "*"
     destination_port_range     = "3389"
-    source_address_prefix      = var.corporate_subnet_cidr
+    source_address_prefix      = try(var.subnets["corporate"].cidr, "10.0.6.0/24")
     destination_address_prefix = "*"
   }
 
@@ -112,18 +68,19 @@ resource "azurerm_network_security_group" "management" {
     protocol                   = "Tcp"
     source_port_range          = "*"
     destination_port_range     = "22"
-    source_address_prefix      = var.corporate_subnet_cidr
+    source_address_prefix      = try(var.subnets["corporate"].cidr, "10.0.6.0/24")
     destination_address_prefix = "*"
   }
 }
 
 resource "azurerm_subnet_network_security_group_association" "management" {
-  subnet_id                 = azurerm_subnet.management.id
+  count                     = contains(keys(var.subnets), "management") ? 1 : 0
+  subnet_id                 = azurerm_subnet.hub["management"].id
   network_security_group_id = azurerm_network_security_group.management.id
 }
 
 resource "azurerm_network_security_group" "private" {
-  name                = "nsg-private"
+  name                = "nsg-${var.resource_group_name}-private"
   location            = azurerm_resource_group.hub.location
   resource_group_name = azurerm_resource_group.hub.name
   tags                = var.tags
@@ -136,7 +93,7 @@ resource "azurerm_network_security_group" "private" {
     protocol                   = "*"
     source_port_range          = "*"
     destination_port_range     = "*"
-    source_address_prefix      = var.dmz_subnet_cidr
+    source_address_prefix      = try(var.subnets["dmz"].cidr, "10.0.1.0/24")
     destination_address_prefix = "*"
   }
 
@@ -154,15 +111,17 @@ resource "azurerm_network_security_group" "private" {
 }
 
 resource "azurerm_subnet_network_security_group_association" "private" {
-  subnet_id                 = azurerm_subnet.private.id
+  count                     = contains(keys(var.subnets), "private") ? 1 : 0
+  subnet_id                 = azurerm_subnet.hub["private"].id
   network_security_group_id = azurerm_network_security_group.private.id
 }
 
 ##############################################################
-# Azure Firewall – in DMZ subnet
+# Azure Firewall  (count = 0 when deploy_firewall = false)
 ##############################################################
 resource "azurerm_public_ip" "firewall" {
-  name                = "pip-fw-hub"
+  count               = var.deploy_firewall ? 1 : 0
+  name                = var.firewall_pip_name
   location            = azurerm_resource_group.hub.location
   resource_group_name = azurerm_resource_group.hub.name
   allocation_method   = "Static"
@@ -171,7 +130,8 @@ resource "azurerm_public_ip" "firewall" {
 }
 
 resource "azurerm_firewall_policy" "hub" {
-  name                = "fwpol-hub"
+  count               = var.deploy_firewall ? 1 : 0
+  name                = var.firewall_policy_name
   location            = azurerm_resource_group.hub.location
   resource_group_name = azurerm_resource_group.hub.name
   sku                 = var.firewall_sku_tier
@@ -179,38 +139,37 @@ resource "azurerm_firewall_policy" "hub" {
 }
 
 resource "azurerm_firewall" "hub" {
+  count               = var.deploy_firewall ? 1 : 0
   name                = var.firewall_name
   location            = azurerm_resource_group.hub.location
   resource_group_name = azurerm_resource_group.hub.name
   sku_name            = var.firewall_sku_name
   sku_tier            = var.firewall_sku_tier
-  firewall_policy_id  = azurerm_firewall_policy.hub.id
+  firewall_policy_id  = azurerm_firewall_policy.hub[0].id
   tags                = var.tags
 
   ip_configuration {
     name                 = "fw-ipconfig"
-    subnet_id            = azurerm_subnet.dmz.id
-    public_ip_address_id = azurerm_public_ip.firewall.id
+    subnet_id            = azurerm_subnet.hub["dmz"].id
+    public_ip_address_id = azurerm_public_ip.firewall[0].id
   }
 }
 
-##############################################################
-# Firewall Policy Rule Collections (example rules)
-##############################################################
 resource "azurerm_firewall_policy_rule_collection_group" "hub" {
+  count              = var.deploy_firewall ? 1 : 0
   name               = "fwpol-rcg-hub"
-  firewall_policy_id = azurerm_firewall_policy.hub.id
+  firewall_policy_id = azurerm_firewall_policy.hub[0].id
   priority           = 100
 
   network_rule_collection {
-    name     = "allow-spoke-to-spoke"
+    name     = "allow-hub-internal"
     priority = 100
     action   = "Allow"
 
     rule {
-      name                  = "spoke-to-spoke"
+      name                  = "hub-internal-traffic"
       protocols             = ["Any"]
-      source_addresses      = ["10.1.0.0/8"]
+      source_addresses      = ["10.0.0.0/8"]
       destination_addresses = ["10.0.0.0/8"]
       destination_ports     = ["*"]
     }
@@ -238,10 +197,11 @@ resource "azurerm_firewall_policy_rule_collection_group" "hub" {
 }
 
 ##############################################################
-# NAT Gateway
+# NAT Gateway  (count = 0 when deploy_nat_gateway = false)
 ##############################################################
 resource "azurerm_public_ip" "natgw" {
-  name                = "pip-natgw-hub"
+  count               = var.deploy_nat_gateway ? 1 : 0
+  name                = var.nat_gateway_pip_name
   location            = azurerm_resource_group.hub.location
   resource_group_name = azurerm_resource_group.hub.name
   allocation_method   = "Static"
@@ -251,7 +211,8 @@ resource "azurerm_public_ip" "natgw" {
 }
 
 resource "azurerm_nat_gateway" "hub" {
-  name                    = "natgw-hub"
+  count                   = var.deploy_nat_gateway ? 1 : 0
+  name                    = var.nat_gateway_name
   location                = azurerm_resource_group.hub.location
   resource_group_name     = azurerm_resource_group.hub.name
   sku_name                = "Standard"
@@ -261,20 +222,23 @@ resource "azurerm_nat_gateway" "hub" {
 }
 
 resource "azurerm_nat_gateway_public_ip_association" "hub" {
-  nat_gateway_id       = azurerm_nat_gateway.hub.id
-  public_ip_address_id = azurerm_public_ip.natgw.id
+  count                = var.deploy_nat_gateway ? 1 : 0
+  nat_gateway_id       = azurerm_nat_gateway.hub[0].id
+  public_ip_address_id = azurerm_public_ip.natgw[0].id
 }
 
 resource "azurerm_subnet_nat_gateway_association" "natgw" {
-  subnet_id      = azurerm_subnet.natgw.id
-  nat_gateway_id = azurerm_nat_gateway.hub.id
+  count          = var.deploy_nat_gateway && contains(keys(var.subnets), "natgw") ? 1 : 0
+  subnet_id      = azurerm_subnet.hub["natgw"].id
+  nat_gateway_id = azurerm_nat_gateway.hub[0].id
 }
 
 ##############################################################
-# Application Gateway (WAF v2)
+# Application Gateway  (count = 0 when deploy_appgw = false)
 ##############################################################
 resource "azurerm_public_ip" "appgw" {
-  name                = "pip-agw-hub"
+  count               = var.deploy_appgw ? 1 : 0
+  name                = var.appgw_pip_name
   location            = azurerm_resource_group.hub.location
   resource_group_name = azurerm_resource_group.hub.name
   allocation_method   = "Static"
@@ -283,15 +247,16 @@ resource "azurerm_public_ip" "appgw" {
 }
 
 locals {
-  appgw_backend_pool_name            = "agwbp-hub"
-  appgw_frontend_port_name           = "agwfp-hub"
-  appgw_frontend_ip_config_name      = "agwfeip-hub"
-  appgw_http_setting_name            = "agwhs-hub"
-  appgw_listener_name                = "agwl-hub"
-  appgw_request_routing_rule_name    = "agwrr-hub"
+  appgw_backend_pool_name         = "agwbp-hub"
+  appgw_frontend_port_name        = "agwfp-hub"
+  appgw_frontend_ip_config_name   = "agwfeip-hub"
+  appgw_http_setting_name         = "agwhs-hub"
+  appgw_listener_name             = "agwl-hub"
+  appgw_request_routing_rule_name = "agwrr-hub"
 }
 
 resource "azurerm_application_gateway" "hub" {
+  count               = var.deploy_appgw ? 1 : 0
   name                = var.appgw_name
   location            = azurerm_resource_group.hub.location
   resource_group_name = azurerm_resource_group.hub.name
@@ -305,7 +270,7 @@ resource "azurerm_application_gateway" "hub" {
 
   gateway_ip_configuration {
     name      = "agw-ip-config"
-    subnet_id = azurerm_subnet.appgw.id
+    subnet_id = azurerm_subnet.hub["appgw"].id
   }
 
   frontend_port {
@@ -315,7 +280,7 @@ resource "azurerm_application_gateway" "hub" {
 
   frontend_ip_configuration {
     name                 = local.appgw_frontend_ip_config_name
-    public_ip_address_id = azurerm_public_ip.appgw.id
+    public_ip_address_id = azurerm_public_ip.appgw[0].id
   }
 
   backend_address_pool {
@@ -355,10 +320,11 @@ resource "azurerm_application_gateway" "hub" {
 }
 
 ##############################################################
-# Internal Load Balancer – Private subnet
+# Internal Load Balancer  (count = 0 when deploy_internal_lb = false)
 ##############################################################
 resource "azurerm_lb" "internal" {
-  name                = "lb-internal-hub"
+  count               = var.deploy_internal_lb ? 1 : 0
+  name                = var.internal_lb_name
   location            = azurerm_resource_group.hub.location
   resource_group_name = azurerm_resource_group.hub.name
   sku                 = "Standard"
@@ -366,38 +332,42 @@ resource "azurerm_lb" "internal" {
 
   frontend_ip_configuration {
     name                          = "lb-internal-feip"
-    subnet_id                     = azurerm_subnet.private.id
+    subnet_id                     = azurerm_subnet.hub["private"].id
     private_ip_address_allocation = "Dynamic"
   }
 }
 
 resource "azurerm_lb_backend_address_pool" "internal" {
-  loadbalancer_id = azurerm_lb.internal.id
+  count           = var.deploy_internal_lb ? 1 : 0
+  loadbalancer_id = azurerm_lb.internal[0].id
   name            = "lb-internal-bep"
 }
 
 resource "azurerm_lb_probe" "internal" {
-  loadbalancer_id = azurerm_lb.internal.id
+  count           = var.deploy_internal_lb ? 1 : 0
+  loadbalancer_id = azurerm_lb.internal[0].id
   name            = "lb-probe-http"
   port            = 80
 }
 
 resource "azurerm_lb_rule" "internal" {
-  loadbalancer_id                = azurerm_lb.internal.id
+  count                          = var.deploy_internal_lb ? 1 : 0
+  loadbalancer_id                = azurerm_lb.internal[0].id
   name                           = "lb-rule-http"
   protocol                       = "Tcp"
   frontend_port                  = 80
   backend_port                   = 80
   frontend_ip_configuration_name = "lb-internal-feip"
-  backend_address_pool_ids       = [azurerm_lb_backend_address_pool.internal.id]
-  probe_id                       = azurerm_lb_probe.internal.id
+  backend_address_pool_ids       = [azurerm_lb_backend_address_pool.internal[0].id]
+  probe_id                       = azurerm_lb_probe.internal[0].id
 }
 
 ##############################################################
-# External Load Balancer – Public subnet
+# External Load Balancer  (count = 0 when deploy_external_lb = false)
 ##############################################################
 resource "azurerm_public_ip" "external_lb" {
-  name                = "pip-lb-external-hub"
+  count               = var.deploy_external_lb ? 1 : 0
+  name                = var.external_lb_pip_name
   location            = azurerm_resource_group.hub.location
   resource_group_name = azurerm_resource_group.hub.name
   allocation_method   = "Static"
@@ -406,7 +376,8 @@ resource "azurerm_public_ip" "external_lb" {
 }
 
 resource "azurerm_lb" "external" {
-  name                = "lb-external-hub"
+  count               = var.deploy_external_lb ? 1 : 0
+  name                = var.external_lb_name
   location            = azurerm_resource_group.hub.location
   resource_group_name = azurerm_resource_group.hub.name
   sku                 = "Standard"
@@ -414,37 +385,41 @@ resource "azurerm_lb" "external" {
 
   frontend_ip_configuration {
     name                 = "lb-external-feip"
-    public_ip_address_id = azurerm_public_ip.external_lb.id
+    public_ip_address_id = azurerm_public_ip.external_lb[0].id
   }
 }
 
 resource "azurerm_lb_backend_address_pool" "external" {
-  loadbalancer_id = azurerm_lb.external.id
+  count           = var.deploy_external_lb ? 1 : 0
+  loadbalancer_id = azurerm_lb.external[0].id
   name            = "lb-external-bep"
 }
 
 resource "azurerm_lb_probe" "external" {
-  loadbalancer_id = azurerm_lb.external.id
+  count           = var.deploy_external_lb ? 1 : 0
+  loadbalancer_id = azurerm_lb.external[0].id
   name            = "lb-probe-https"
   port            = 443
 }
 
 resource "azurerm_lb_rule" "external" {
-  loadbalancer_id                = azurerm_lb.external.id
+  count                          = var.deploy_external_lb ? 1 : 0
+  loadbalancer_id                = azurerm_lb.external[0].id
   name                           = "lb-rule-https"
   protocol                       = "Tcp"
   frontend_port                  = 443
   backend_port                   = 443
   frontend_ip_configuration_name = "lb-external-feip"
-  backend_address_pool_ids       = [azurerm_lb_backend_address_pool.external.id]
-  probe_id                       = azurerm_lb_probe.external.id
+  backend_address_pool_ids       = [azurerm_lb_backend_address_pool.external[0].id]
+  probe_id                       = azurerm_lb_probe.external[0].id
 }
 
 ##############################################################
-# Azure Bastion – Management subnet
+# Azure Bastion  (count = 0 when deploy_bastion = false)
 ##############################################################
 resource "azurerm_public_ip" "bastion" {
-  name                = "pip-bastion-hub"
+  count               = var.deploy_bastion ? 1 : 0
+  name                = var.bastion_pip_name
   location            = azurerm_resource_group.hub.location
   resource_group_name = azurerm_resource_group.hub.name
   allocation_method   = "Static"
@@ -453,47 +428,55 @@ resource "azurerm_public_ip" "bastion" {
 }
 
 resource "azurerm_bastion_host" "hub" {
-  name                = "bas-hub"
+  count               = var.deploy_bastion ? 1 : 0
+  name                = var.bastion_name
   location            = azurerm_resource_group.hub.location
   resource_group_name = azurerm_resource_group.hub.name
   tags                = var.tags
 
   ip_configuration {
     name                 = "bastion-ipconfig"
-    subnet_id            = azurerm_subnet.bastion.id
-    public_ip_address_id = azurerm_public_ip.bastion.id
+    subnet_id            = azurerm_subnet.hub["bastion"].id
+    public_ip_address_id = azurerm_public_ip.bastion[0].id
   }
 }
 
 ##############################################################
 # Route Table – force traffic through Azure Firewall
+# Only associated when Firewall is deployed
 ##############################################################
 resource "azurerm_route_table" "hub" {
-  name                          = "rt-hub"
+  name                          = var.route_table_name
   location                      = azurerm_resource_group.hub.location
   resource_group_name           = azurerm_resource_group.hub.name
   disable_bgp_route_propagation = true
   tags                          = var.tags
 
-  route {
-    name                   = "default-via-firewall"
-    address_prefix         = "0.0.0.0/0"
-    next_hop_type          = "VirtualAppliance"
-    next_hop_in_ip_address = azurerm_firewall.hub.ip_configuration[0].private_ip_address
+  dynamic "route" {
+    for_each = var.deploy_firewall ? [1] : []
+    content {
+      name                   = "default-via-firewall"
+      address_prefix         = "0.0.0.0/0"
+      next_hop_type          = "VirtualAppliance"
+      next_hop_in_ip_address = azurerm_firewall.hub[0].ip_configuration[0].private_ip_address
+    }
   }
 }
 
 resource "azurerm_subnet_route_table_association" "private" {
-  subnet_id      = azurerm_subnet.private.id
+  count          = contains(keys(var.subnets), "private") ? 1 : 0
+  subnet_id      = azurerm_subnet.hub["private"].id
   route_table_id = azurerm_route_table.hub.id
 }
 
 resource "azurerm_subnet_route_table_association" "management" {
-  subnet_id      = azurerm_subnet.management.id
+  count          = contains(keys(var.subnets), "management") ? 1 : 0
+  subnet_id      = azurerm_subnet.hub["management"].id
   route_table_id = azurerm_route_table.hub.id
 }
 
 resource "azurerm_subnet_route_table_association" "corporate" {
-  subnet_id      = azurerm_subnet.corporate.id
+  count          = contains(keys(var.subnets), "corporate") ? 1 : 0
+  subnet_id      = azurerm_subnet.hub["corporate"].id
   route_table_id = azurerm_route_table.hub.id
 }

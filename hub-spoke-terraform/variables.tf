@@ -1,132 +1,178 @@
 ##############################################################
-# variables.tf – Input variables for Hub subscription deployment
+# variables.tf – All inputs for the Hub deployment
+# Every resource name, flag, and network setting is set here
+# and overridden per-environment via .tfvars files.
 ##############################################################
 
-# ── Subscriptions ────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# SUBSCRIPTION & LOCATION
+# ─────────────────────────────────────────────────────────────
 variable "hub_subscription_id" {
-  description = "Azure Subscription ID for the Hub"
+  description = "Azure Subscription ID"
   type        = string
 }
 
-# ── Global ───────────────────────────────────────────────────
 variable "location" {
-  description = "Azure region to deploy resources"
+  description = "Azure region (e.g. eastus)"
   type        = string
-  default     = "eastus"
 }
 
 variable "tags" {
-  description = "Tags to apply to all resources"
+  description = "Tags applied to every resource"
   type        = map(string)
-  default = {
-    Environment  = "Production"
-    ManagedBy    = "Terraform"
-    Architecture = "Hub"
-  }
+  default     = {}
 }
 
-# ── Hub VNet ─────────────────────────────────────────────────
-variable "hub_resource_group_name" {
-  description = "Resource group name for the Hub"
+# ─────────────────────────────────────────────────────────────
+# RESOURCE GROUP
+# ─────────────────────────────────────────────────────────────
+variable "deploy_resource_group" {
+  description = "true = create RG | false = use existing RG (set resource_group_name)"
+  type        = bool
+  default     = true
+}
+
+variable "resource_group_name" {
+  description = "Resource Group name (created or referenced)"
   type        = string
-  default     = "rg-hub-network"
+}
+
+# ─────────────────────────────────────────────────────────────
+# VIRTUAL NETWORK & SUBNETS
+# ─────────────────────────────────────────────────────────────
+variable "deploy_vnet" {
+  description = "true = create VNet + Subnets | false = use existing (set existing_subnet_ids)"
+  type        = bool
+  default     = true
 }
 
 variable "hub_vnet_name" {
-  description = "Hub Virtual Network name"
+  description = "Hub VNet name"
   type        = string
-  default     = "vnet-hub"
 }
 
 variable "hub_vnet_address_space" {
   description = "Hub VNet address space"
   type        = list(string)
-  default     = ["10.0.0.0/16"]
 }
 
-# ── Hub Subnet CIDRs ─────────────────────────────────────────
-variable "management_subnet_cidr" {
-  description = "CIDR for the Management subnet"
+# One entry per subnet. Add/remove subnets here — no module changes needed.
+# Special names: dmz key → "AzureFirewallSubnet", bastion key → "AzureBastionSubnet"
+variable "subnets" {
+  description = "Map of subnets (for_each in vnet module)"
+  type = map(object({
+    name = string
+    cidr = string
+  }))
+}
+
+# Fallback IDs — only needed when deploy_vnet = false (pre-existing VNet)
+variable "existing_subnet_ids" {
+  description = "Map of subnet IDs when reusing an existing VNet (deploy_vnet = false)"
+  type        = map(string)
+  default     = {}
+}
+
+# ─────────────────────────────────────────────────────────────
+# NSG
+# ─────────────────────────────────────────────────────────────
+variable "deploy_nsg" {
+  description = "true = create NSGs | false = skip"
+  type        = bool
+  default     = true
+}
+
+variable "nsg_management_name" { type = string; default = "nsg-management" }
+variable "nsg_private_name"    { type = string; default = "nsg-private" }
+
+# ─────────────────────────────────────────────────────────────
+# ROUTE TABLE
+# ─────────────────────────────────────────────────────────────
+variable "deploy_route_table" {
+  description = "true = create Route Table | false = skip"
+  type        = bool
+  default     = true
+}
+
+variable "route_table_name" { type = string; default = "rt-hub" }
+
+# ─────────────────────────────────────────────────────────────
+# AZURE FIREWALL
+# ─────────────────────────────────────────────────────────────
+variable "deploy_firewall" {
+  description = "true = deploy Azure Firewall | false = skip"
+  type        = bool
+  default     = true
+}
+
+variable "firewall_name"        { type = string; default = "fw-hub" }
+variable "firewall_pip_name"    { type = string; default = "pip-fw-hub" }
+variable "firewall_policy_name" { type = string; default = "fwpol-hub" }
+variable "firewall_sku_name"    { type = string; default = "AZFW_VNet" }
+variable "firewall_sku_tier"    { type = string; default = "Standard" }
+
+# Fallback — only used when deploy_firewall = false
+variable "existing_firewall_private_ip" {
+  description = "Private IP of pre-existing Firewall (deploy_firewall = false)"
   type        = string
-  default     = "10.0.0.0/24"
+  default     = ""
 }
 
-variable "dmz_subnet_cidr" {
-  description = "CIDR for the DMZ subnet (Azure Firewall lives here)"
-  type        = string
-  default     = "10.0.1.0/24"
+# ─────────────────────────────────────────────────────────────
+# NAT GATEWAY
+# ─────────────────────────────────────────────────────────────
+variable "deploy_nat_gateway" {
+  description = "true = deploy NAT Gateway | false = skip"
+  type        = bool
+  default     = true
 }
 
-variable "private_subnet_cidr" {
-  description = "CIDR for the Private subnet (Internal Load Balancer)"
-  type        = string
-  default     = "10.0.2.0/24"
+variable "nat_gateway_name"     { type = string; default = "natgw-hub" }
+variable "nat_gateway_pip_name" { type = string; default = "pip-natgw-hub" }
+
+# ─────────────────────────────────────────────────────────────
+# APPLICATION GATEWAY
+# ─────────────────────────────────────────────────────────────
+variable "deploy_appgw" {
+  description = "true = deploy Application Gateway | false = skip"
+  type        = bool
+  default     = true
 }
 
-variable "public_subnet_cidr" {
-  description = "CIDR for the Public subnet (External Load Balancer)"
-  type        = string
-  default     = "10.0.3.0/24"
+variable "appgw_name"     { type = string; default = "agw-hub" }
+variable "appgw_pip_name" { type = string; default = "pip-agw-hub" }
+variable "appgw_sku_name" { type = string; default = "WAF_v2" }
+variable "appgw_sku_tier" { type = string; default = "WAF_v2" }
+variable "appgw_capacity" { type = number; default = 2 }
+
+# ─────────────────────────────────────────────────────────────
+# LOAD BALANCERS
+# ─────────────────────────────────────────────────────────────
+variable "deploy_internal_lb" {
+  description = "true = deploy Internal LB | false = skip"
+  type        = bool
+  default     = true
 }
 
-variable "appgw_subnet_cidr" {
-  description = "CIDR for the Application Gateway subnet"
-  type        = string
-  default     = "10.0.4.0/24"
+variable "internal_lb_name" { type = string; default = "lb-internal-hub" }
+
+variable "deploy_external_lb" {
+  description = "true = deploy External LB | false = skip"
+  type        = bool
+  default     = true
 }
 
-variable "natgw_subnet_cidr" {
-  description = "CIDR for the NAT Gateway subnet"
-  type        = string
-  default     = "10.0.5.0/24"
+variable "external_lb_name"     { type = string; default = "lb-external-hub" }
+variable "external_lb_pip_name" { type = string; default = "pip-lb-external-hub" }
+
+# ─────────────────────────────────────────────────────────────
+# AZURE BASTION
+# ─────────────────────────────────────────────────────────────
+variable "deploy_bastion" {
+  description = "true = deploy Azure Bastion | false = skip"
+  type        = bool
+  default     = true
 }
 
-variable "corporate_subnet_cidr" {
-  description = "CIDR for the Corporate subnet"
-  type        = string
-  default     = "10.0.6.0/24"
-}
-
-# ── Azure Firewall ───────────────────────────────────────────
-variable "firewall_name" {
-  description = "Name of the Azure Firewall"
-  type        = string
-  default     = "fw-hub"
-}
-
-variable "firewall_sku_name" {
-  description = "Azure Firewall SKU name"
-  type        = string
-  default     = "AZFW_VNet"
-}
-
-variable "firewall_sku_tier" {
-  description = "Azure Firewall SKU tier (Standard or Premium)"
-  type        = string
-  default     = "Standard"
-}
-
-# ── Application Gateway ──────────────────────────────────────
-variable "appgw_name" {
-  description = "Name of the Application Gateway"
-  type        = string
-  default     = "agw-hub"
-}
-
-variable "appgw_sku_name" {
-  description = "Application Gateway SKU name"
-  type        = string
-  default     = "WAF_v2"
-}
-
-variable "appgw_sku_tier" {
-  description = "Application Gateway SKU tier"
-  type        = string
-  default     = "WAF_v2"
-}
-
-variable "appgw_capacity" {
-  description = "Application Gateway capacity (instance count)"
-  type        = number
-  default     = 2
-}
+variable "bastion_name"     { type = string; default = "bas-hub" }
+variable "bastion_pip_name" { type = string; default = "pip-bastion-hub" }
